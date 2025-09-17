@@ -8,6 +8,7 @@ export OMP_NUM_THREADS=1
 CSV="encode_filess.csv"
 API="https://www.encodeproject.org"
 RAW_CHR_SIZES="hg38.chrom.sizes"
+CHR_SIZES="$RAW_CHR_SIZES"
 OUTROOT="encode_output"
 MAX_RETRIES=3
 RETRY_DELAY=5
@@ -37,6 +38,11 @@ if ! command -v aria2c >/dev/null 2>&1; then
   exit 1
 fi
 
+# Chrom sizes
+if [[ ! -f "$CHR_SIZES" ]]; then
+  log_warn "Chrom sizes missing: $CHR_SIZES"
+fi
+
 mkdir -p "$OUTROOT"
 PROCESSED_FILE="$OUTROOT/.processed_ids"
 : > "$PROCESSED_FILE"
@@ -62,27 +68,6 @@ mark_processed(){
 already_processed(){
   local id="$1"
   [[ -f "$PROCESSED_FILE" ]] && grep -qxF "$id" "$PROCESSED_FILE" 2>/dev/null
-}
-
-# Clean chromsizes
-validate_and_clean_chromsizes(){
-  local raw="$1"
-  local out="$OUTROOT/hg38.chrom.sizes.clean"
-  if [[ ! -f "$raw" ]]; then
-    log_err "chrom.sizes missing: $raw"
-    return 1
-  fi
-  awk 'BEGIN{FS="[ \t]+";OFS="\t"} /^[[:space:]]*($|#|track|browser)/{next} NF>=2{ if($2~/^[0-9]+$/) if(!seen[$1]++){print $1,$2}}' "$raw" > "$out.tmp" || true
-  if [[ ! -s "$out.tmp" ]]; then
-    log_err "no valid chrom entries"
-    rm -f "$out.tmp"
-    return 1
-  fi
-  mv -f "$out.tmp" "$out"
-  chmod 644 "$out"
-  CHR_SIZES="$out"
-  log_info "Chromsizes ready: $out"
-  return 0
 }
 
 # Simple download
@@ -111,7 +96,8 @@ process_track(){
   if already_processed "$id"; then log_info "$id skipped"; return 0; fi
 
   mkdir -p "$tgt_dir"
-  local dl=$(download_with_aria2 "$id" "$tgt_dir" || true)
+  local dl
+  dl=$(download_with_aria2 "$id" "$tgt_dir" || true)
   if [[ -z "$dl" || ! -f "$dl" ]]; then
     log_warn "No download for $id"
     mark_processed "$id"
@@ -199,7 +185,7 @@ process_track(){
   esac
 
   if [[ -n "${final_wig}" && -f "$final_wig" ]]; then
-    log_info "Postprocess wig"
+    # Postprocess wig
     [[ -x "$BIN_BINNER" ]] && "$BIN_BINNER" "$final_wig" || log_warn "Binner absent"
     [[ -x "$BIN_SMOOTHER" ]] && "$BIN_SMOOTHER" "$final_wig" || log_warn "Smoother absent"
     mark_processed "$id"
@@ -220,12 +206,7 @@ run_sg(){
   [[ -x "$BIN_SG" ]] && "$BIN_SG" chrom="$CHR_SIZES" $SG_OPTS "$f1" "$f2" || log_warn "StereoGene absent"
 }
 
-# Prepare chromsizes
-if ! validate_and_clean_chromsizes "$RAW_CHR_SIZES"; then
-  log_err "Chromsizes failed"
-  exit 1
-fi
-
+# Main CSV processing
 log_info "Start CSV processing"
 while IFS=$'\t' read -r assay target files || [[ -n "$assay" ]]; do
   [[ -z "$assay" ]] && continue
@@ -259,6 +240,7 @@ while IFS=$'\t' read -r assay target files || [[ -n "$assay" ]]; do
   fi
 done < <(tail -n +2 "$CSV")
 
+# StereoGene pairwise
 log_info "StereoGene pairwise"
 for base_dir in "$OUTROOT"/*; do
   [[ -d "$base_dir" ]] || continue
@@ -275,6 +257,7 @@ for base_dir in "$OUTROOT"/*; do
   done
 done
 
+# Archive assays
 log_info "Archive assays"
 for base_dir in "$OUTROOT"/*; do
   [[ -d "$base_dir" ]] || continue
